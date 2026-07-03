@@ -1,0 +1,240 @@
+#include <math.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
+// PCA9685 object
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+int Servo1, Servo2;
+int MinValue1, MidValue1;
+int MinValue2, MidValue2;
+
+int floorLvl = -13;  
+int upLiftlevel = -8;
+
+int del = 300; 
+
+const float L1 = 7.4;  
+const float L2 = 7.4;  
+int bas = 85;
+
+// --- Function Prototypes ---
+void stand();
+int IK(float x, float y, int legChosed, bool first);
+int shoulderMap(int servoChosed, int angle);
+void Trot(int period);
+void StandTrot();
+void interpolation(float startX1, float startY1, float endX1, float endY1, float startX2, float startY2, float endX2, float endY2, float steps);
+
+//-------------------------------------------------------SERVO VALUES----------------------------------------------------------
+#define SERVOMIN0 115   
+#define SERVOMAX0 525   
+
+#define SERVOMIN1 215   
+#define SERVOMAX1 420   
+
+#define SERVOMIN2 112   
+#define SERVOMAX2 312   
+
+#define SERVOMIN3 131   
+#define SERVOMAX3 525   
+
+#define SERVOMIN4 200   
+#define SERVOMAX4 412   
+
+#define SERVOMIN5 317   
+#define SERVOMAX5 511   
+
+#define SERVOMIN6 115   
+#define SERVOMAX6 509   
+
+#define SERVOMIN7 250   
+#define SERVOMAX7 459   
+
+#define SERVOMIN8 328   
+#define SERVOMAX8 525   
+
+#define SERVOMIN9 110   
+#define SERVOMAX9 501   
+
+#define SERVOMIN10 176   
+#define SERVOMAX10 393   
+
+#define SERVOMIN11 117   
+#define SERVOMAX11 317   
+
+//-------------------------------------------------------SETUP----------------------------------------------------------
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("System Booting... Stabilizing Servos!");
+  
+  pwm.begin();        
+  pwm.setPWMFreq(50); 
+  stand();
+  delay(2000);        
+}
+
+void loop() {
+  Trot(5);
+}
+
+//------------------------------------------------------------------------STAND-------------------------------------------------------
+void stand() {
+  for (int leg = 1; leg <= 4; leg++) {
+    int femurAngle = IK(3, -11, leg, true);
+    pwm.setPWM(Servo1, 0, femurAngle);  
+    
+    int tibiaAngle = IK(3, -11, leg, false);
+    pwm.setPWM(Servo2, 0, tibiaAngle); 
+  }
+}
+
+//------------------------------------------------------------------------IK-----------------------------------------------------
+int IK(float x, float y, int legChosed, bool first) {
+  int servo2Angle = 0, servo1Angle = 0; 
+  y = -y;
+  
+  float c2 = (x * x + y * y - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+  c2 = constrain(c2, -1.0, 1.0);
+  
+  // Mathematically flip the knee bend direction
+  float theta2 = atan2(-sqrt(1 - c2 * c2), c2);  
+  
+  float k1 = L1 + L2 * cos(theta2);
+  float k2 = L2 * sin(theta2);
+  float theta1 = atan2(y, x) - atan2(k2, k1);
+
+  int angle1 = theta1 * 180.0 / PI;
+  
+  // abs() ensures the output stays positive for the map() functions to handle correctly
+  int angle2 = abs(theta2 * 180.0 / PI); 
+
+  if (legChosed == 1) {
+    Servo1 = 0;
+    Servo2 = 1;
+    servo1Angle = map(angle1, 180, 0, SERVOMIN0, SERVOMAX0);
+    servo2Angle = map(angle2, 90, 0, SERVOMIN1, SERVOMAX1);
+  } else if (legChosed == 2) {
+    Servo1 = 3;
+    Servo2 = 4;
+    servo1Angle = map(angle1, 0, 180, SERVOMIN3, SERVOMAX3);
+    servo2Angle = map(angle2, 0, 90, SERVOMIN4, SERVOMAX4);       
+  } else if (legChosed == 3) {
+    Servo1 = 6;
+    Servo2 = 7;
+    servo1Angle = map(angle1, 180, 0, SERVOMIN6, SERVOMAX6);
+    servo2Angle = map(angle2, 90, 0, SERVOMIN7, SERVOMAX7);  
+  } else if (legChosed == 4) {
+    Servo1 = 9;
+    Servo2 = 10;
+    servo1Angle = map(angle1, 0, 180, SERVOMIN9, SERVOMAX9);
+    servo2Angle = map(angle2, 0, 90, SERVOMIN10, SERVOMAX10);
+  }
+
+  if (first) {
+    return servo1Angle;
+  } else {
+    return servo2Angle;
+  }
+}
+
+//----------------experimentel-------------------
+int shoulderMap(int servoChosed, int angle) {
+  int ReturnedAngle = 0;
+
+  if (servoChosed == 1) {
+    ReturnedAngle = map(angle, 0, 90, SERVOMIN2, SERVOMAX2); 
+  } else if (servoChosed == 2) {
+    ReturnedAngle = map(angle, 90, 0, SERVOMIN5, SERVOMAX5); 
+  } else if (servoChosed == 3) {
+    ReturnedAngle = map(angle, 90, 0, SERVOMIN8, SERVOMAX8); 
+  } else if (servoChosed == 4) {
+    ReturnedAngle = map(angle, 0, 90, SERVOMIN11, SERVOMAX11); 
+  }
+
+  return ReturnedAngle;
+}
+
+//--------------------THE CLEAN, TIGHT TROT CYCLE-------------------
+void Trot(int period) {
+  // THE NEW "TINY MOTION" LIMITS
+  float FrontX = 1.5;   // Steps forward much less
+  float BackX = -0.5;   // Pushes back much less
+  float FloorY = -11.0; // Keeps the exact same standing height
+  
+  float MidX = 0.5;     // The mathematical middle of 1.5 and -0.5
+  float AirY = -10.0;   // Barely lifts off the ground (only 1 unit up)
+
+  // Phase 1: Pair 1 lifts slightly (Back to Mid). Pair 2 drags on floor (Front to Mid).
+  interpolation(BackX, FloorY, MidX, AirY, FrontX, FloorY, MidX, FloorY, 10); 
+  delay(period);
+
+  // Phase 2: Pair 1 lands (Mid to Front). Pair 2 finishes drag (Mid to Back).
+  interpolation(MidX, AirY, FrontX, FloorY, MidX, FloorY, BackX, FloorY, 10); 
+  delay(period);
+
+  // Phase 3: Pair 1 drags on floor (Front to Mid). Pair 2 lifts slightly (Back to Mid).
+  interpolation(FrontX, FloorY, MidX, FloorY, BackX, FloorY, MidX, AirY, 10); 
+  delay(period);
+
+  // Phase 4: Pair 1 finishes drag (Mid to Back). Pair 2 lands (Mid to Front).
+  interpolation(MidX, FloorY, BackX, FloorY, MidX, AirY, FrontX, FloorY, 10); 
+  delay(period);
+}
+
+//-------------------standing trot-------------------
+void StandTrot() {
+  float AX = 3;
+  float AY = -6;
+  float BX = 3;
+  float BY = -11;
+
+  interpolation(BX, BY, AX, AY, BX, BY, BX, BY, 50); 
+  interpolation(AX, AY, BX, BY, BX, BY, BX, BY, 50);
+}
+
+//----------------------------interpolation function------------------------
+void interpolation(float startX1, float startY1, float endX1, float endY1, float startX2, float startY2, float endX2, float endY2, float steps) {
+  
+  for (float i = 1; i <= steps; i++) {
+    
+    // Interpolate Cartesian Coordinates for straight lines
+    float currX1 = startX1 + ((endX1 - startX1) * (i / steps));
+    float currY1 = startY1 + ((endY1 - startY1) * (i / steps));
+    
+    float currX2 = startX2 + ((endX2 - startX2) * (i / steps));
+    float currY2 = startY2 + ((endY2 - startY2) * (i / steps));
+
+    // Calculate IK
+    int pos1 = IK(currX1, currY1, 1, true);
+    int pos2 = IK(currX1, currY1, 1, false);
+    int pos3 = IK(currX1, currY1, 4, true);
+    int pos4 = IK(currX1, currY1, 4, false);
+
+    int pos5 = IK(currX2, currY2, 2, true);
+    int pos6 = IK(currX2, currY2, 2, false);
+    int pos7 = IK(currX2, currY2, 3, true);
+    int pos8 = IK(currX2, currY2, 3, false);
+
+    // Keep shoulders steady on original pins
+    pwm.setPWM(2, 0, shoulderMap(1, bas));  
+    pwm.setPWM(5, 0, shoulderMap(2, bas)); 
+    pwm.setPWM(8, 0, shoulderMap(3, bas));  
+    pwm.setPWM(11, 0, shoulderMap(4, bas)); 
+
+    // Send signals to original stable pins
+    pwm.setPWM(0, 0, pos1);  
+    pwm.setPWM(1, 0, pos2);
+    pwm.setPWM(9, 0, pos3);  
+    pwm.setPWM(10, 0, pos4);
+
+    pwm.setPWM(3, 0, pos5);  
+    pwm.setPWM(4, 0, pos6);
+    pwm.setPWM(6, 0, pos7);  
+    pwm.setPWM(7, 0, pos8);
+
+    // Motor hardware delay
+    delay(10); 
+  }
+}
