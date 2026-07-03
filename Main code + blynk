@@ -1,0 +1,298 @@
+#define BLYNK_TEMPLATE_ID   "TMPL375Z80SfY"
+#define BLYNK_TEMPLATE_NAME "my robot dog"
+#define BLYNK_AUTH_TOKEN    "zRzPjna8yb93TEBQHSoGLGXm7ilVTM0r"
+
+#include <math.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+
+// --- YOUR LOCAL WI-FI CREDENTIALS ---
+const char* ssid = "shakti";
+const char* pass = "shakti123";
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+// --- STATE DEFINITIONS ---
+enum RobotState { STATE_STAND, STATE_WALK, STATE_SIT, STATE_SAY_HII };
+RobotState currentState = STATE_STAND; // Power-on default position
+
+// --- HARDWARE SERVO CALIBRATION LIMITS ---
+#define SERVOMIN0 115   
+#define SERVOMAX0 525   
+#define SERVOMIN1 215   
+#define SERVOMAX1 420   
+#define SERVOMIN2 112   
+#define SERVOMAX2 312   
+#define SERVOMIN3 131   
+#define SERVOMAX3 525   
+#define SERVOMIN4 200   
+#define SERVOMAX4 412   
+#define SERVOMIN5 317   
+#define SERVOMAX5 511   
+#define SERVOMIN6 115   
+#define SERVOMAX6 509   
+#define SERVOMIN7 250   
+#define SERVOMAX7 459   
+#define SERVOMIN8 328   
+#define SERVOMAX8 525   
+#define SERVOMIN9 110   
+#define SERVOMAX9 501   
+#define SERVOMIN10 176  
+#define SERVOMAX10 393  
+#define SERVOMIN11 117  
+#define SERVOMAX11 317  
+
+// --- IK & WALK SETTINGS ---
+int Servo1, Servo2;
+const float L1 = 7.4;  
+const float L2 = 7.4;  
+int bas1 = 85, bas2 = 85, bas3 = 85, bas4 = 85; 
+
+// --- FIXED POSE ANGLES (STAND/SIT) ---
+const int limits[4][4] = {
+  {115, 525, 215, 420}, {131, 525, 200, 412},
+  {115, 509, 250, 459}, {110, 501, 176, 393}
+};
+int l2Angles[3] = {43, 130, 130}; 
+
+// --- Function Prototypes ---
+void executeStandPose();
+void executeSitPose();
+void runTrotCycle();
+void runSayHiiCycle();
+int IK(float x, float y, int legChosed, bool first);
+int shoulderMap(int servoChosed, int angle);
+void interpolation(float startX1, float startY1, float endX1, float endY1, float startX2, float startY2, float endX2, float endY2, float steps);
+void moveLeg(int leg, int sh, int fem, int tib);
+
+// --- BLYNK VIRTUAL PIN LISTENERS ---
+BLYNK_WRITE(V0) { if (param.asInt() == 1) currentState = STATE_WALK; }
+BLYNK_WRITE(V1) { if (param.asInt() == 1) currentState = STATE_STAND; }
+BLYNK_WRITE(V2) { if (param.asInt() == 1) currentState = STATE_SIT; }
+BLYNK_WRITE(V3) { if (param.asInt() == 1) currentState = STATE_SAY_HII; }
+
+void setup() {
+  Serial.begin(115200); 
+  delay(10);
+  
+  Wire.begin(); 
+  pwm.begin();        
+  pwm.setPWMFreq(50); 
+  
+  // 1. FORCED BOOT SAFETY: Lock into standing position instantly
+  executeStandPose();
+  delay(1000); 
+
+  // 2. Manual Non-Blocking Wi-Fi Initialization
+  Serial.print("Connecting to WiFi...");
+  WiFi.begin(ssid, pass);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+  
+  // 3. Mount Blynk network layout profile
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Serial.println("Blynk Config Loaded. Authenticating...");
+  
+  // 4. Verification Check: Wait up to 4 seconds to see if Blynk links up
+  int timeout = 0;
+  while (Blynk.connect() == false && timeout < 8) {
+    delay(500);
+    Serial.print("?");
+    timeout++;
+  }
+
+  if (Blynk.connected()) {
+    Serial.println("\n[SUCCESS] Blynk Cloud is Connected! 🚀");
+  } else {
+    Serial.println("\n[ERROR] WiFi is OK, but Blynk Connection Failed.");
+  }
+}
+
+void loop() {
+  Blynk.run(); // Keeps wireless data tracking active live
+  
+  // State controller loop switcher
+  switch (currentState) {
+    case STATE_STAND:
+      executeStandPose();
+      break;
+    case STATE_WALK:
+      runTrotCycle();
+      break;
+    case STATE_SIT:
+      executeSitPose();
+      break;
+    case STATE_SAY_HII:
+      runSayHiiCycle();
+      break;
+  }
+}
+
+// --- MOTION MODULES ---
+
+void executeStandPose() {
+  int leg1Femur = map(130, 180, 0, SERVOMIN0, SERVOMAX0);
+  int leg1Tibia = map(70, 90, 0, SERVOMIN1, SERVOMAX1);
+  int leg1Shoulder = map(43, 0, 90, 150, 450);
+
+  int leg2Femur = map(130, 0, 180, SERVOMIN3, SERVOMAX3);
+  int leg2Tibia = map(70, 0, 90, SERVOMIN4, SERVOMAX4);
+  int leg2Shoulder = map(42, 90, 0, 150, 450);
+
+  int leg3Femur = map(130, 180, 0, SERVOMIN6, SERVOMAX6);
+  int leg3Tibia = map(70, 90, 0, SERVOMIN7, SERVOMAX7);
+  int leg3Shoulder = map(31, 90, 0, 150, 450);
+
+  int leg4Femur = map(130, 0, 180, SERVOMIN9, SERVOMAX9);
+  int leg4Tibia = map(70, 0, 90, SERVOMIN10, SERVOMAX10);
+  int leg4Shoulder = map(47, 0, 90, 150, 450);
+
+  pwm.setPWM(0, 0, leg1Femur);    pwm.setPWM(1, 0, leg1Tibia);    pwm.setPWM(2, 0, leg1Shoulder);
+  pwm.setPWM(3, 0, leg2Femur);    pwm.setPWM(4, 0, leg2Tibia);    pwm.setPWM(5, 0, leg2Shoulder);
+  pwm.setPWM(6, 0, leg3Femur);    pwm.setPWM(7, 0, leg3Tibia);    pwm.setPWM(8, 0, leg3Shoulder);
+  pwm.setPWM(9, 0, leg4Femur);    pwm.setPWM(10, 0, leg4Tibia);   pwm.setPWM(11, 0, leg4Shoulder);
+}
+
+void executeSitPose() {
+  int pulseL1Femur = map(60, 180, 0, SERVOMIN0, SERVOMAX0);
+  int pulseL1Tibia = map(100, 90, 0, SERVOMIN1, SERVOMAX1);
+  int pulseL1Shoulder = map(42, 0, 90, 150, 450);
+
+  int pulseL2Femur = map(60, 0, 180, SERVOMIN3, SERVOMAX3);
+  int pulseL2Tibia = map(100, 0, 90, SERVOMIN4, SERVOMAX4);
+  int pulseL2Shoulder = map(43, 90, 0, 150, 450);
+
+  int pulseL3Femur = map(170, 180, 0, SERVOMIN6, SERVOMAX6);
+  int pulseL3Tibia = map(70, 90, 0, SERVOMIN7, SERVOMAX7);
+  int pulseL3Shoulder = map(31, 90, 0, 150, 450);
+
+  int pulseL4Femur = map(170, 0, 180, SERVOMIN9, SERVOMAX9);
+  int pulseL4Tibia = map(70, 0, 90, SERVOMIN10, SERVOMAX10);
+  int pulseL4Shoulder = map(47, 0, 90, 150, 450);
+
+  pwm.setPWM(0, 0, pulseL1Femur);    pwm.setPWM(1, 0, pulseL1Tibia);    pwm.setPWM(2, 0, pulseL1Shoulder);
+  pwm.setPWM(3, 0, pulseL2Femur);    pwm.setPWM(4, 0, pulseL2Tibia);    pwm.setPWM(5, 0, pulseL2Shoulder);
+  pwm.setPWM(6, 0, pulseL3Femur);    pwm.setPWM(7, 0, pulseL3Tibia);    pwm.setPWM(8, 0, pulseL3Shoulder);
+  pwm.setPWM(9, 0, pulseL4Femur);    pwm.setPWM(10, 0, pulseL4Tibia);   pwm.setPWM(11, 0, pulseL4Shoulder);
+}
+
+void runTrotCycle() {
+  float FrontX = 0.5, BackX = -0.3, FloorY = -12.0, MidX = 0.1, AirY = -10.5;    
+  
+  interpolation(BackX, FloorY, MidX, AirY, FrontX, FloorY, MidX, FloorY, 12); 
+  if (currentState != STATE_WALK) return;
+  interpolation(MidX, AirY, FrontX, FloorY, MidX, FloorY, BackX, FloorY, 12); 
+  if (currentState != STATE_WALK) return;
+  interpolation(FrontX, FloorY, MidX, FloorY, BackX, FloorY, MidX, AirY, 12); 
+  if (currentState != STATE_WALK) return;
+  interpolation(MidX, FloorY, BackX, FloorY, MidX, AirY, FrontX, FloorY, 12); 
+}
+
+void runSayHiiCycle() {
+  moveLeg(1, 42, 60, 100);
+  moveLeg(3, 31, 170, 70);
+  moveLeg(4, 47, 170, 70);
+
+  for (int targetFemur = 130; targetFemur <= 160; targetFemur++) {
+    if (currentState != STATE_SAY_HII) return; 
+    l2Angles[1] = targetFemur; 
+    moveLeg(2, 43, l2Angles[1], 130);
+    delay(7); 
+  }
+  
+  for(int i=0; i<20; i++) { Blynk.run(); delay(10); if (currentState != STATE_SAY_HII) return; }
+
+  for (int targetFemur = 160; targetFemur >= 130; targetFemur--) {
+    if (currentState != STATE_SAY_HII) return;
+    l2Angles[1] = targetFemur; 
+    moveLeg(2, 43, l2Angles[1], 130);
+    delay(7); 
+  }
+  
+  for(int i=0; i<20; i++) { Blynk.run(); delay(10); if (currentState != STATE_SAY_HII) return; }
+}
+
+// --- LOWER LEVEL UTILITIES ---
+
+int IK(float x, float y, int legChosed, bool first) {
+  y = -y;
+  float c2 = (x * x + y * y - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+  c2 = constrain(c2, -1.0, 1.0);
+  float theta2 = atan2(-sqrt(1 - c2 * c2), c2);  
+  float k1 = L1 + L2 * cos(theta2);
+  float k2 = L2 * sin(theta2);
+  float theta1 = atan2(y, x) - atan2(k2, k1);
+  int angle1 = theta1 * 180.0 / PI;
+  int angle2 = abs(theta2 * 180.0 / PI); 
+
+  angle1 = constrain(angle1, 10, 170); 
+  angle2 = constrain(angle2, 10, 90);  
+
+  if (legChosed == 1) {
+    Servo1 = 0; Servo2 = 1;
+    return first ? map(angle1, 180, 0, SERVOMIN0, SERVOMAX0) : map(angle2, 90, 0, SERVOMIN1, SERVOMAX1);
+  } else if (legChosed == 2) {
+    Servo1 = 3; Servo2 = 4;
+    return first ? map(angle1, 0, 180, SERVOMIN3, SERVOMAX3) : map(angle2, 0, 90, SERVOMIN4, SERVOMAX4);       
+  } else if (legChosed == 3) {
+    Servo1 = 6; Servo2 = 7;
+    return first ? map(angle1, 180, 0, SERVOMIN6, SERVOMAX6) : map(angle2, 90, 0, SERVOMIN7, SERVOMAX7);  
+  } else if (legChosed == 4) {
+    Servo1 = 9; Servo2 = 10;
+    return first ? map(angle1, 0, 180, SERVOMIN9, SERVOMAX9) : map(angle2, 0, 90, SERVOMIN10, SERVOMAX10);
+  }
+  return 0;
+}
+
+int shoulderMap(int servoChosed, int angle) {
+  if (servoChosed == 1) return map(angle, 0, 90, SERVOMIN2, SERVOMAX2);
+  if (servoChosed == 2) return map(angle, 90, 0, SERVOMIN5, SERVOMAX5);
+  if (servoChosed == 3) return map(angle, 90, 0, SERVOMIN8, SERVOMAX8);
+  if (servoChosed == 4) return map(angle, 0, 90, SERVOMIN11, SERVOMAX11);
+  return 0;
+}
+
+void interpolation(float startX1, float startY1, float endX1, float endY1, float startX2, float startY2, float endX2, float endY2, float steps) {
+  for (float i = 1; i <= steps; i++) {
+    Blynk.run(); 
+    if (currentState != STATE_WALK) return;
+
+    float currX1 = startX1 + ((endX1 - startX1) * (i / steps));
+    float currY1 = startY1 + ((endY1 - startY1) * (i / steps));
+    float currX2 = startX2 + ((endX2 - startX2) * (i / steps));
+    float currY2 = startY2 + ((endY2 - startY2) * (i / steps));
+
+    pwm.setPWM(2, 0, shoulderMap(1, bas1));  
+    pwm.setPWM(5, 0, shoulderMap(2, bas2)); 
+    pwm.setPWM(8, 0, shoulderMap(3, bas3));  
+    pwm.setPWM(11, 0, shoulderMap(4, bas4)); 
+
+    pwm.setPWM(0, 0, IK(currX1, currY1, 1, true));  pwm.setPWM(1, 0, IK(currX1, currY1, 1, false));
+    pwm.setPWM(9, 0, IK(currX1, currY1, 4, true));  pwm.setPWM(10, 0, IK(currX1, currY1, 4, false));
+    pwm.setPWM(3, 0, IK(currX2, currY2, 2, true));  pwm.setPWM(4, 0, IK(currX2, currY2, 2, false));
+    pwm.setPWM(6, 0, IK(currX2, currY2, 3, true));  pwm.setPWM(7, 0, IK(currX2, currY2, 3, false));
+    delay(10); 
+  }
+}
+
+void moveLeg(int leg, int sh, int fem, int tib) {
+  int idx = leg - 1;
+  int fPulse = map(fem, (idx % 2 == 0) ? 180 : 0, (idx % 2 == 0) ? 0 : 180, limits[idx][0], limits[idx][1]);
+  int tPulse = map(tib, (idx % 2 == 0) ? 90 : 0,  (idx % 2 == 0) ? 0 : 90,  limits[idx][2], limits[idx][3]);
+  int sPulse = map(sh,  (idx == 0 || idx == 3) ? 0 : 90, (idx == 0 || idx == 3) ? 90 : 0, 150, 450);
+
+  int baseChannel = idx * 3;
+  pwm.setPWM(baseChannel,     0, fPulse);
+  pwm.setPWM(baseChannel + 1, 0, tPulse);
+  pwm.setPWM(baseChannel + 2, 0, sPulse);
+}
